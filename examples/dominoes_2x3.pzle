@@ -1,0 +1,9 @@
+puzzle:
+  name: dominoes_2x3
+  board_shape: "rectangle{3,2}"
+  can_rotate: true
+  can_flip: false
+  pieces:
+    - id: domino
+      shape: "##"
+      count: 3

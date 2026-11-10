@@ -1,0 +1,60 @@
+puzzle:
+  name: pentomino_6x10
+  piece_count: 12
+  all_use: true
+  board_shape: "rectangle{10,6}"
+  can_rotate: true
+  can_flip: true
+  pieces:
+    - id: 1
+      shape: "#####"
+    - id: 2
+      shape: |
+        ####
+        #...
+    - id: 3
+      shape: |
+        ####
+        .#..
+    - id: 4
+      shape: |
+        ###
+        ##.
+    - id: 5
+      shape: |
+        ###
+        #.#
+    - id: 6
+      shape: |
+        ###
+        #..
+        #..
+    - id: 7
+      shape: |
+        ###
+        .#.
+        .#.
+    - id: 8
+      shape: |
+        ###.
+        ..##
+    - id: 9
+      shape: |
+        ##.
+        .##
+        .#.
+    - id: 10
+      shape: |
+        ##.
+        .##
+        ..#
+    - id: 11
+      shape: |
+        ##.
+        .#.
+        .##
+    - id: 12
+      shape: |
+        .#.
+        ###
+        .#.
