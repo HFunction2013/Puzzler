@@ -360,9 +360,8 @@ impl<'a> Search<'a> {
     }
 
     /// Picks the empty playable cell with the fewest feasible placements
-    /// covering it. Returns `None` when there are no empty cells (the caller
-    /// handles that) or when some empty cell has zero candidates, in which
-    /// case the branch is dead.
+    /// covering it (MRV). Returns `None` when some empty cell has zero
+    /// candidates, in which case the branch is dead.
     fn choose_cell(&self) -> Option<usize> {
         let mut best_cell: Option<usize> = None;
         let mut best_count = usize::MAX;
