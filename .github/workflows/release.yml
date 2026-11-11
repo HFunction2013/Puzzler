@@ -21,10 +21,10 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: puzzler-x86_64-pc-windows-msvc.exe
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             asset: puzzler-x86_64-apple-darwin
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
             asset: puzzler-aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
