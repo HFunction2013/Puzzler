@@ -24,7 +24,9 @@ impl Shape {
         for &(r, c) in &self.cells {
             rows[r as usize][c as usize] = '#';
         }
-        rows.into_iter().map(|row| row.into_iter().collect()).collect()
+        rows.into_iter()
+            .map(|row| row.into_iter().collect())
+            .collect()
     }
 }
 
@@ -45,8 +47,10 @@ fn normalize_i32(cells: &[(i32, i32)]) -> (Vec<(u16, u16)>, u16, u16) {
 /// Parses a `"###\n.#."`-style shape description.
 pub fn parse_shape_text(text: &str, what: &str) -> Result<Shape, String> {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    let mut lines: Vec<String> =
-        normalized.split('\n').map(|s| s.trim_end().to_string()).collect();
+    let mut lines: Vec<String> = normalized
+        .split('\n')
+        .map(|s| s.trim_end().to_string())
+        .collect();
 
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
@@ -147,8 +151,11 @@ pub fn orientations(shape: &Shape, allow_rotate: bool, allow_flip: bool) -> Vec<
     for mirror in 0..mirrors {
         let mirrored = mirror == 1;
         for turn in 0..turns {
-            let mut cells: Vec<(i32, i32)> =
-                shape.cells.iter().map(|&(r, c)| (r as i32, c as i32)).collect();
+            let mut cells: Vec<(i32, i32)> = shape
+                .cells
+                .iter()
+                .map(|&(r, c)| (r as i32, c as i32))
+                .collect();
             if mirrored {
                 for cell in cells.iter_mut() {
                     cell.1 = -cell.1;
@@ -239,8 +246,7 @@ pub fn board_symmetries(board: &Board) -> Vec<Vec<u32>> {
                 (nr * w + nc) as u32
             })
             .collect();
-        let maps_onto_itself =
-            (0..w * h).all(|i| !board.cells[i] || board.cells[perm[i] as usize]);
+        let maps_onto_itself = (0..w * h).all(|i| !board.cells[i] || board.cells[perm[i] as usize]);
         if maps_onto_itself && seen.insert(perm.clone()) {
             perms.push(perm);
         }

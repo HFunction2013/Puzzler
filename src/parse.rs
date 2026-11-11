@@ -25,8 +25,7 @@ pub struct Parsed {
 }
 
 pub fn parse_str(text: &str) -> Result<Parsed, String> {
-    let root: Value =
-        serde_yaml::from_str(text).map_err(|e| format!("invalid YAML: {e}"))?;
+    let root: Value = serde_yaml::from_str(text).map_err(|e| format!("invalid YAML: {e}"))?;
     let root_map = root
         .as_mapping()
         .ok_or_else(|| "the document must be a YAML mapping".to_string())?;
@@ -88,8 +87,8 @@ pub fn parse_str(text: &str) -> Result<Parsed, String> {
         None => None,
     };
 
-    let pieces_value = find(&map, "pieces")
-        .ok_or_else(|| "puzzle: missing the `pieces:` list".to_string())?;
+    let pieces_value =
+        find(&map, "pieces").ok_or_else(|| "puzzle: missing the `pieces:` list".to_string())?;
     let piece_entries = pieces_value
         .as_sequence()
         .ok_or_else(|| "puzzle.pieces: a list of pieces is required".to_string())?;
@@ -100,7 +99,15 @@ pub fn parse_str(text: &str) -> Result<Parsed, String> {
         let entry_map = normalize_map(entry, &ctx)?;
         warn_unknown_keys(
             &entry_map,
-            &["id", "shape", "count", "can_flip", "can_rotate", "flip", "rotate"],
+            &[
+                "id",
+                "shape",
+                "count",
+                "can_flip",
+                "can_rotate",
+                "flip",
+                "rotate",
+            ],
             &ctx,
             &mut warnings,
         );
@@ -110,8 +117,8 @@ pub fn parse_str(text: &str) -> Result<Parsed, String> {
             None => (index + 1).to_string(),
         };
 
-        let shape_value = find(&entry_map, "shape")
-            .ok_or_else(|| format!("{ctx}: missing `shape:`"))?;
+        let shape_value =
+            find(&entry_map, "shape").ok_or_else(|| format!("{ctx}: missing `shape:`"))?;
         let shape_text_value = shape_text(shape_value, &format!("{ctx}.shape"))?;
         let shape = geom::parse_shape_text(&shape_text_value, &format!("piece {id}"))?;
 
@@ -119,10 +126,7 @@ pub fn parse_str(text: &str) -> Result<Parsed, String> {
             Some(v) => {
                 let c = as_usize(v, &format!("{ctx}.count"))?;
                 if c == 0 || c > u16::MAX as usize {
-                    return Err(format!(
-                        "{ctx}: count must be between 1 and {}",
-                        u16::MAX
-                    ));
+                    return Err(format!("{ctx}: count must be between 1 and {}", u16::MAX));
                 }
                 c as u16
             }
@@ -236,7 +240,10 @@ fn as_string(value: &Value, ctx: &str) -> Result<String, String> {
         Value::String(s) => Ok(s.clone()),
         Value::Number(n) => Ok(n.to_string()),
         Value::Bool(b) => Ok(b.to_string()),
-        other => Err(format!("{ctx}: expected a string, found {}", type_name(other))),
+        other => Err(format!(
+            "{ctx}: expected a string, found {}",
+            type_name(other)
+        )),
     }
 }
 
@@ -270,7 +277,10 @@ fn as_bool(value: &Value, ctx: &str) -> Result<bool, String> {
             "false" | "no" | "off" | "0" => Ok(false),
             _ => Err(format!("{ctx}: expected a boolean, found {s:?}")),
         },
-        other => Err(format!("{ctx}: expected a boolean, found {}", type_name(other))),
+        other => Err(format!(
+            "{ctx}: expected a boolean, found {}",
+            type_name(other)
+        )),
     }
 }
 

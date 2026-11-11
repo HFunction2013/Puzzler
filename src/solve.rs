@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Condvar};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -202,8 +202,14 @@ impl Worker {
         false
     }
 
-    fn search(&mut self, shared: &Shared, started: Instant, global_stop: &AtomicBool,
-              depth: u32, queue: Option<&WorkQueue>) {
+    fn search(
+        &mut self,
+        shared: &Shared,
+        started: Instant,
+        global_stop: &AtomicBool,
+        depth: u32,
+        queue: Option<&WorkQueue>,
+    ) {
         self.nodes += 1;
         if self.is_stopped(shared, started, global_stop) {
             return;
@@ -235,7 +241,10 @@ impl Worker {
             if self.counts[piece] == 0 {
                 continue;
             }
-            if self.occupied.intersects(&shared.placements[pid as usize].mask) {
+            if self
+                .occupied
+                .intersects(&shared.placements[pid as usize].mask)
+            {
                 continue;
             }
             candidates.push(pid);
@@ -262,7 +271,8 @@ impl Worker {
             let mut extra_tasks = Vec::new();
             for &pid in &candidates[..candidates.len() - 1] {
                 let piece = shared.placements[pid as usize].piece as usize;
-                self.occupied.or_assign(&shared.placements[pid as usize].mask);
+                self.occupied
+                    .or_assign(&shared.placements[pid as usize].mask);
                 self.counts[piece] -= 1;
                 self.remaining_cells -= shared.areas[piece];
                 self.stack.push(pid);
@@ -277,13 +287,18 @@ impl Worker {
                 self.stack.pop();
                 self.remaining_cells += shared.areas[piece];
                 self.counts[piece] += 1;
-                self.occupied.xor_assign(&shared.placements[pid as usize].mask);
+                self.occupied
+                    .xor_assign(&shared.placements[pid as usize].mask);
             }
             q.push_all(extra_tasks);
         }
 
         // Process the remaining candidates ourselves.
-        let start = if split_at > 0 { candidates.len() - 1 } else { 0 };
+        let start = if split_at > 0 {
+            candidates.len() - 1
+        } else {
+            0
+        };
         for &pid in &candidates[start..] {
             if self.is_stopped(shared, started, global_stop) {
                 return;
@@ -292,11 +307,15 @@ impl Worker {
             if self.counts[piece] == 0 {
                 continue;
             }
-            if self.occupied.intersects(&shared.placements[pid as usize].mask) {
+            if self
+                .occupied
+                .intersects(&shared.placements[pid as usize].mask)
+            {
                 continue;
             }
 
-            self.occupied.or_assign(&shared.placements[pid as usize].mask);
+            self.occupied
+                .or_assign(&shared.placements[pid as usize].mask);
             self.counts[piece] -= 1;
             self.remaining_cells -= shared.areas[piece];
             self.stack.push(pid);
@@ -306,7 +325,8 @@ impl Worker {
             self.stack.pop();
             self.remaining_cells += shared.areas[piece];
             self.counts[piece] += 1;
-            self.occupied.xor_assign(&shared.placements[pid as usize].mask);
+            self.occupied
+                .xor_assign(&shared.placements[pid as usize].mask);
         }
     }
 
@@ -333,7 +353,10 @@ impl Worker {
                     if self.counts[piece] == 0 {
                         continue;
                     }
-                    if self.occupied.intersects(&shared.placements[pid as usize].mask) {
+                    if self
+                        .occupied
+                        .intersects(&shared.placements[pid as usize].mask)
+                    {
                         continue;
                     }
                     count += 1;
@@ -356,7 +379,12 @@ impl Worker {
     #[inline]
     fn empty_count(&self, shared: &Shared) -> u32 {
         let mut total = 0;
-        for (b, o) in shared.board.words().iter().zip(self.occupied.words().iter()) {
+        for (b, o) in shared
+            .board
+            .words()
+            .iter()
+            .zip(self.occupied.words().iter())
+        {
             total += (b & !o).count_ones();
         }
         total
@@ -414,7 +442,7 @@ impl Worker {
                 for (cell, &target) in perm.iter().enumerate() {
                     candidate[target as usize] = self.labels[cell];
                 }
-                if best.as_ref().is_none_or(|b| *b > candidate) {
+                if best.as_ref().map_or(true, |b| *b > candidate) {
                     best = Some(candidate);
                 }
             }
@@ -516,7 +544,9 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
     let mut class_of: Vec<u16> = Vec::with_capacity(puzzle.pieces.len());
     for piece in &puzzle.pieces {
         let next = shape_classes.len() as u16;
-        let class = *shape_classes.entry(piece.shape.cells.clone()).or_insert(next);
+        let class = *shape_classes
+            .entry(piece.shape.cells.clone())
+            .or_insert(next);
         class_of.push(class);
     }
 
@@ -570,7 +600,10 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
                 if root_worker.counts[piece] == 0 {
                     continue;
                 }
-                if root_worker.occupied.intersects(&shared.placements[pid as usize].mask) {
+                if root_worker
+                    .occupied
+                    .intersects(&shared.placements[pid as usize].mask)
+                {
                     continue;
                 }
                 root_candidates.push(pid);
@@ -597,7 +630,9 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
                 let mut worker = Worker::new(&shared);
                 for &pid in &root_candidates {
                     let piece = shared.placements[pid as usize].piece as usize;
-                    worker.occupied.or_assign(&shared.placements[pid as usize].mask);
+                    worker
+                        .occupied
+                        .or_assign(&shared.placements[pid as usize].mask);
                     worker.counts[piece] -= 1;
                     worker.remaining_cells -= shared.areas[piece];
                     worker.stack.push(pid);
@@ -605,7 +640,9 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
                     worker.stack.pop();
                     worker.remaining_cells += shared.areas[piece];
                     worker.counts[piece] += 1;
-                    worker.occupied.xor_assign(&shared.placements[pid as usize].mask);
+                    worker
+                        .occupied
+                        .xor_assign(&shared.placements[pid as usize].mask);
                     if worker.stop {
                         break;
                     }
@@ -625,7 +662,9 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
                     let mut initial_tasks = Vec::new();
                     for &pid in &root_candidates {
                         let piece = shared.placements[pid as usize].piece as usize;
-                        builder.occupied.or_assign(&shared.placements[pid as usize].mask);
+                        builder
+                            .occupied
+                            .or_assign(&shared.placements[pid as usize].mask);
                         builder.counts[piece] -= 1;
                         builder.remaining_cells -= shared.areas[piece];
                         builder.stack.push(pid);
@@ -638,7 +677,9 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
                         builder.stack.pop();
                         builder.remaining_cells += shared.areas[piece];
                         builder.counts[piece] += 1;
-                        builder.occupied.xor_assign(&shared.placements[pid as usize].mask);
+                        builder
+                            .occupied
+                            .xor_assign(&shared.placements[pid as usize].mask);
                     }
                     queue.push_all(initial_tasks);
                 }
@@ -919,7 +960,10 @@ puzzle:
     - id: a
       shape: "##"
 "###;
-        assert!(parse::parse_str(text).is_err(), "pieces cannot fill the board");
+        assert!(
+            parse::parse_str(text).is_err(),
+            "pieces cannot fill the board"
+        );
     }
 
     #[test]

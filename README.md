@@ -1,4 +1,4 @@
-# Puzzler
+# puzzler
 
 A fast exact-cover solver for polyomino / jigsaw puzzles defined in a tiny
 YAML dialect (`.pzle`). It enumerates every distinct tiling of a board,
@@ -27,6 +27,13 @@ puzzler puzzle.pzle
 - **Polyomino-grade speed.** The classic 12-pentomino `6×10` rectangle —
   which has 2 339 distinct tilings — is solved in roughly 20 seconds on a
   single core.
+
+## GUI
+
+A cross-platform desktop front-end lives in
+[puzzler-gui](https://github.com/HFunction2013/puzzler-gui): a visual `.pzle`
+editor, one-click solving and a solution browser. The GUI bundles this
+command-line solver in its release archives.
 
 ## Install
 

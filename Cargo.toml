@@ -5,8 +5,9 @@ edition = "2021"
 rust-version = "1.75"
 description = "A fast exact-cover solver for polyomino / jigsaw puzzles defined in .pzle (YAML) files"
 license = "MIT"
-repository = "https://github.com/HFunction2013/Puzzler"
+repository = "https://github.com/HFunction2013/puzzler"
 readme = "README.md"
+homepage = "https://github.com/HFunction2013/puzzler"
 keywords = ["puzzle", "polyomino", "exact-cover", "solver", "jigsaw"]
 categories = ["games", "algorithms"]
 

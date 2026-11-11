@@ -146,10 +146,7 @@ pub fn build_report(puzzle: &Puzzle, result: &SolveResult) -> Report {
                                     .cells
                                     .iter()
                                     .map(|&cell| {
-                                        [
-                                            cell as usize % board.width,
-                                            cell as usize / board.width,
-                                        ]
+                                        [cell as usize % board.width, cell as usize / board.width]
                                     })
                                     .collect(),
                             }
@@ -161,7 +158,12 @@ pub fn build_report(puzzle: &Puzzle, result: &SolveResult) -> Report {
     }
 }
 
-pub fn write_to_file(path: &Path, puzzle: &Puzzle, result: &SolveResult, compress: bool) -> io::Result<()> {
+pub fn write_to_file(
+    path: &Path,
+    puzzle: &Puzzle,
+    result: &SolveResult,
+    compress: bool,
+) -> io::Result<()> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
     let report = build_report(puzzle, result);

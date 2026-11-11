@@ -110,9 +110,9 @@ impl Args {
                 "--compress" => args.compress = true,
                 "--limit" => {
                     let value = iter.next().ok_or("`--limit` needs a number")?;
-                    let parsed = value
-                        .parse::<usize>()
-                        .map_err(|_| format!("`--limit` expects a positive integer, got {value:?}"))?;
+                    let parsed = value.parse::<usize>().map_err(|_| {
+                        format!("`--limit` expects a positive integer, got {value:?}")
+                    })?;
                     if parsed == 0 {
                         return Err("`--limit` must be at least 1".to_string());
                     }
@@ -120,9 +120,9 @@ impl Args {
                 }
                 "--nodes" => {
                     let value = iter.next().ok_or("`--nodes` needs a number")?;
-                    let parsed = value
-                        .parse::<u64>()
-                        .map_err(|_| format!("`--nodes` expects a positive integer, got {value:?}"))?;
+                    let parsed = value.parse::<u64>().map_err(|_| {
+                        format!("`--nodes` expects a positive integer, got {value:?}")
+                    })?;
                     if parsed == 0 {
                         return Err("`--nodes` must be at least 1".to_string());
                     }
@@ -130,9 +130,9 @@ impl Args {
                 }
                 "--time" => {
                     let value = iter.next().ok_or("`--time` needs a number of seconds")?;
-                    let parsed: f64 = value
-                        .parse()
-                        .map_err(|_| format!("`--time` expects a number of seconds, got {value:?}"))?;
+                    let parsed: f64 = value.parse().map_err(|_| {
+                        format!("`--time` expects a number of seconds, got {value:?}")
+                    })?;
                     if !parsed.is_finite() || parsed <= 0.0 {
                         return Err("`--time` must be greater than zero".to_string());
                     }
@@ -432,7 +432,11 @@ fn group_digits(value: u64) -> String {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn read_input(path: &Path) -> Result<String, String> {
