@@ -80,7 +80,6 @@ pub struct SolveResult {
 struct Placement {
     piece: u16,
     mask: BitSet,
-    cells: Vec<u32>,
     rotation: u8,
     mirrored: bool,
 }
@@ -138,7 +137,6 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
                     placements.push(Placement {
                         piece: piece_index as u16,
                         mask,
-                        cells,
                         rotation: orientation.rotation,
                         mirrored: orientation.mirrored,
                     });
@@ -207,7 +205,7 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
         .iter()
         .map(|p| PlacementInfo {
             piece: p.piece as usize,
-            cells: p.cells.clone(),
+            cells: p.mask.indices(),
             rotation: p.rotation,
             mirrored: p.mirrored,
         })
@@ -330,7 +328,7 @@ impl<'a> Search<'a> {
             self.areas[pb.piece as usize]
                 .cmp(&self.areas[pa.piece as usize])
                 .then(pa.piece.cmp(&pb.piece))
-                .then(pa.cells.cmp(&pb.cells))
+                .then(pa.mask.words().cmp(pb.mask.words()))
         });
 
         for &pid in &candidates {
@@ -366,30 +364,41 @@ impl<'a> Search<'a> {
         let mut best_cell: Option<usize> = None;
         let mut best_count = usize::MAX;
 
-        for cell in 0..self.n {
-            if !self.board.get(cell) || self.occupied.get(cell) {
-                continue;
-            }
-            let mut count = 0usize;
-            for &pid in &self.covering[cell] {
-                let piece = self.placements[pid as usize].piece as usize;
-                if self.counts[piece] == 0 {
-                    continue;
+        // Iterate only over empty playable cells using the bitboards.
+        for (wi, (bw, ow)) in self
+            .board
+            .words()
+            .iter()
+            .zip(self.occupied.words().iter())
+            .enumerate()
+        {
+            let mut empty_bits = bw & !ow;
+            while empty_bits != 0 {
+                let bit = empty_bits.trailing_zeros() as usize;
+                empty_bits &= empty_bits - 1;
+                let cell = wi * 64 + bit;
+
+                let mut count = 0usize;
+                for &pid in &self.covering[cell] {
+                    let piece = self.placements[pid as usize].piece as usize;
+                    if self.counts[piece] == 0 {
+                        continue;
+                    }
+                    if self.occupied.intersects(&self.placements[pid as usize].mask) {
+                        continue;
+                    }
+                    count += 1;
+                    if count >= best_count {
+                        break;
+                    }
                 }
-                if self.occupied.intersects(&self.placements[pid as usize].mask) {
-                    continue;
+                if count == 0 {
+                    return None;
                 }
-                count += 1;
-                if count >= best_count {
-                    break;
+                if count < best_count {
+                    best_count = count;
+                    best_cell = Some(cell);
                 }
-            }
-            if count == 0 {
-                return None;
-            }
-            if count < best_count {
-                best_count = count;
-                best_cell = Some(cell);
             }
         }
         best_cell
@@ -440,7 +449,7 @@ impl<'a> Search<'a> {
         for &pid in &self.stack {
             let placement = &self.placements[pid as usize];
             let class = self.class_of[placement.piece as usize];
-            for &cell in &placement.cells {
+            for cell in placement.mask.indices() {
                 self.labels[cell as usize] = class + 1;
             }
         }
