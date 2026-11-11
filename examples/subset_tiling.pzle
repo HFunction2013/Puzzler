@@ -1,0 +1,12 @@
+# all_use: false — we have more pieces than the board needs; the solver
+# finds which subset of pieces tiles the board.
+# A 2x2 board with three dominoes available (only two are used).
+puzzle:
+  name: subset_tiling
+  board_shape: "rectangle{2,2}"
+  all_use: false
+  can_rotate: true
+  pieces:
+    - id: domino
+      shape: "##"
+      count: 3

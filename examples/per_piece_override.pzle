@@ -1,0 +1,13 @@
+# Per-piece option overrides: the puzzle allows rotation, but piece "fixed"
+# opts out of rotation. A 2x2 board: one horizontal domino (fixed) plus one
+# vertical domino (rotatable).
+puzzle:
+  name: per_piece_override
+  board_shape: "rectangle{2,2}"
+  can_rotate: true
+  pieces:
+    - id: fixed
+      can_rotate: false
+      shape: "##"
+    - id: free
+      shape: "#\n#"

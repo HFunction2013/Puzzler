@@ -1,0 +1,10 @@
+# Same piece type repeated several times (count field).
+# A 2x4 board tiled by four dominoes.
+puzzle:
+  name: four_dominoes
+  board_shape: "rectangle{4,2}"
+  can_rotate: true
+  pieces:
+    - id: domino
+      shape: "##"
+      count: 4

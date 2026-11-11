@@ -1,0 +1,17 @@
+# A T-shaped board (5 cells) tiled by one T-tetromino (4) + one monomino (1).
+# Demonstrates an irregular ASCII board and mixed piece shapes.
+puzzle:
+  name: t_board
+  board_shape: |
+    ###
+    .#.
+    .#.
+  can_rotate: false
+  can_flip: false
+  pieces:
+    - id: T
+      shape: |
+        ###
+        .#.
+    - id: dot
+      shape: "#"

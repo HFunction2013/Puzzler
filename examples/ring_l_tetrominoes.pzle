@@ -1,0 +1,19 @@
+# A 5x5 ring (outer border) tiled by four L-tetrominoes.
+# The center 3x3 is blocked out, demonstrating a non-rectangular board.
+puzzle:
+  name: ring_l_tetrominoes
+  board_shape: |
+    #####
+    #...#
+    #...#
+    #...#
+    #####
+  can_rotate: true
+  can_flip: true
+  pieces:
+    - id: L
+      shape: |
+        ##
+        #.
+        #.
+      count: 4

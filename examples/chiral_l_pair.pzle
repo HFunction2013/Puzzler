@@ -1,0 +1,13 @@
+# Chiral pieces: the L-tetromino is chiral. With can_flip: true both
+# mirror images are available. This 4x2 board needs one L and its mirror.
+puzzle:
+  name: chiral_l_pair
+  board_shape: "rectangle{4,2}"
+  can_rotate: true
+  can_flip: true
+  pieces:
+    - id: L
+      shape: |
+        ###
+        #..
+      count: 2

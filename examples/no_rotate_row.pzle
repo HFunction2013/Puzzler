@@ -1,0 +1,10 @@
+# can_rotate: false — pieces keep the orientation they are written in.
+# A 1x4 row filled by two horizontal dominoes (no rotation needed).
+puzzle:
+  name: no_rotate_row
+  board_shape: "rectangle{4,1}"
+  can_rotate: false
+  pieces:
+    - id: domino
+      shape: "##"
+      count: 2

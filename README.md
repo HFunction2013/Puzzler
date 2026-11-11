@@ -140,6 +140,18 @@ puzzler examples/pentomino_6x10.pzle --limit 1 --json
 puzzler examples/pentomino_6x10.pzle --out solutions.json
 ```
 
+| file | demonstrates |
+|---|---|
+| `pentomino_3x20.pzle` | full set of 12 pentominoes, `can_rotate` + `can_flip` |
+| `pentomino_6x10.pzle` | same pieces on a denser rectangle (2,339 solutions) |
+| `ring_l_tetrominoes.pzle` | non-rectangular board with a hole (5×5 ring), `count: 4` |
+| `four_dominoes.pzle` | repeated piece type via `count: 4` |
+| `chiral_l_pair.pzle` | chiral piece with `can_flip: true` (8 orientations) |
+| `no_rotate_row.pzle` | `can_rotate: false`, pieces keep their written orientation |
+| `per_piece_override.pzle` | per-piece `can_rotate` overriding the global default |
+| `subset_tiling.pzle` | `all_use: false` (extra pieces, only a subset is used) |
+| `t_board.pzle` | irregular ASCII board (T-shape), mixed piece sizes |
+
 ## How it works
 
 1. **Parse & validate.** The YAML is normalised, the board is trimmed to
