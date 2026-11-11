@@ -6,8 +6,8 @@
 //! placements. The root-level branches are split across worker threads.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Condvar};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -105,6 +105,63 @@ struct Worker {
     dp: Vec<u64>,
 }
 
+/// A saved search state that can be stolen by another worker.
+struct Task {
+    occupied: BitSet,
+    counts: Vec<u16>,
+    remaining_cells: u32,
+    stack: Vec<u32>,
+}
+
+/// Shared work queue for dynamic load balancing.
+struct WorkQueue {
+    tasks: Mutex<Vec<Task>>,
+    active: AtomicUsize,
+    cond: Condvar,
+}
+
+impl WorkQueue {
+    fn new() -> Self {
+        Self {
+            tasks: Mutex::new(Vec::new()),
+            active: AtomicUsize::new(0),
+            cond: Condvar::new(),
+        }
+    }
+
+    fn push_all(&self, tasks: Vec<Task>) {
+        let mut queue = self.tasks.lock().unwrap();
+        for t in tasks {
+            queue.push(t);
+        }
+        self.cond.notify_one();
+    }
+
+    /// Pop a task, blocking until one is available or all workers are idle
+    /// and the queue is empty. Returns None when there is no more work.
+    fn pop(&self) -> Option<Task> {
+        let mut tasks = self.tasks.lock().unwrap();
+        loop {
+            if let Some(task) = tasks.pop() {
+                self.active.fetch_add(1, Ordering::SeqCst);
+                return Some(task);
+            }
+            // Queue is empty. If no one is processing a task, we're done.
+            if self.active.load(Ordering::SeqCst) == 0 {
+                self.cond.notify_all();
+                return None;
+            }
+            // Someone is still working; wait for them to push more tasks.
+            tasks = self.cond.wait(tasks).unwrap();
+        }
+    }
+
+    fn finish_task(&self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        self.cond.notify_one();
+    }
+}
+
 impl Worker {
     fn new(shared: &Shared) -> Self {
         Self {
@@ -145,7 +202,8 @@ impl Worker {
         false
     }
 
-    fn search(&mut self, shared: &Shared, started: Instant, global_stop: &AtomicBool) {
+    fn search(&mut self, shared: &Shared, started: Instant, global_stop: &AtomicBool,
+              depth: u32, queue: Option<&WorkQueue>) {
         self.nodes += 1;
         if self.is_stopped(shared, started, global_stop) {
             return;
@@ -191,7 +249,42 @@ impl Worker {
                 .then(pa.mask.words().cmp(pb.mask.words()))
         });
 
-        for &pid in &candidates {
+        // At shallow depths with multiple candidates, split the extras into
+        // stealable tasks so other workers can share the load.
+        let split_at = if depth <= 1 && candidates.len() > 1 && queue.is_some() {
+            1 // keep the last candidate for ourselves, push the rest
+        } else {
+            0
+        };
+
+        if split_at > 0 {
+            let q = queue.unwrap();
+            let mut extra_tasks = Vec::new();
+            for &pid in &candidates[..candidates.len() - 1] {
+                let piece = shared.placements[pid as usize].piece as usize;
+                self.occupied.or_assign(&shared.placements[pid as usize].mask);
+                self.counts[piece] -= 1;
+                self.remaining_cells -= shared.areas[piece];
+                self.stack.push(pid);
+
+                extra_tasks.push(Task {
+                    occupied: self.occupied.clone(),
+                    counts: self.counts.clone(),
+                    remaining_cells: self.remaining_cells,
+                    stack: self.stack.clone(),
+                });
+
+                self.stack.pop();
+                self.remaining_cells += shared.areas[piece];
+                self.counts[piece] += 1;
+                self.occupied.xor_assign(&shared.placements[pid as usize].mask);
+            }
+            q.push_all(extra_tasks);
+        }
+
+        // Process the remaining candidates ourselves.
+        let start = if split_at > 0 { candidates.len() - 1 } else { 0 };
+        for &pid in &candidates[start..] {
             if self.is_stopped(shared, started, global_stop) {
                 return;
             }
@@ -208,7 +301,7 @@ impl Worker {
             self.remaining_cells -= shared.areas[piece];
             self.stack.push(pid);
 
-            self.search(shared, started, global_stop);
+            self.search(shared, started, global_stop, depth + 1, queue);
 
             self.stack.pop();
             self.remaining_cells += shared.areas[piece];
@@ -291,6 +384,13 @@ impl Worker {
 
         let target = target as usize;
         self.dp[target / 64] & (1u64 << (target % 64)) != 0
+    }
+
+    fn apply_task(&mut self, task: Task) {
+        self.occupied = task.occupied;
+        self.counts = task.counts;
+        self.remaining_cells = task.remaining_cells;
+        self.stack = task.stack;
     }
 
     fn record(&mut self, shared: &Shared) {
@@ -501,7 +601,7 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
                     worker.counts[piece] -= 1;
                     worker.remaining_cells -= shared.areas[piece];
                     worker.stack.push(pid);
-                    worker.search(&shared, started, &global_stop);
+                    worker.search(&shared, started, &global_stop, 0, None);
                     worker.stack.pop();
                     worker.remaining_cells += shared.areas[piece];
                     worker.counts[piece] += 1;
@@ -515,33 +615,49 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
                 truncated = worker.stop;
                 all_solutions = worker.solutions;
             } else {
-                // Parallel path: split root candidates across threads.
-                let chunk_size = root_candidates.len().div_ceil(num_threads);
-                let chunks: Vec<Vec<u32>> = root_candidates
-                    .chunks(chunk_size)
-                    .map(|c| c.to_vec())
-                    .collect();
+                // Parallel path: build a shared work queue.
+                // Each root candidate becomes an initial task.
+                let queue = Arc::new(WorkQueue::new());
+
+                // Create initial tasks: place each root candidate and snapshot state.
+                {
+                    let mut builder = Worker::new(&shared);
+                    let mut initial_tasks = Vec::new();
+                    for &pid in &root_candidates {
+                        let piece = shared.placements[pid as usize].piece as usize;
+                        builder.occupied.or_assign(&shared.placements[pid as usize].mask);
+                        builder.counts[piece] -= 1;
+                        builder.remaining_cells -= shared.areas[piece];
+                        builder.stack.push(pid);
+                        initial_tasks.push(Task {
+                            occupied: builder.occupied.clone(),
+                            counts: builder.counts.clone(),
+                            remaining_cells: builder.remaining_cells,
+                            stack: builder.stack.clone(),
+                        });
+                        builder.stack.pop();
+                        builder.remaining_cells += shared.areas[piece];
+                        builder.counts[piece] += 1;
+                        builder.occupied.xor_assign(&shared.placements[pid as usize].mask);
+                    }
+                    queue.push_all(initial_tasks);
+                }
 
                 let mut handles = Vec::new();
-                for chunk in chunks {
+                for _ in 0..num_threads {
                     let shared = shared.clone();
                     let global_stop = global_stop.clone();
+                    let queue = queue.clone();
                     handles.push(thread::spawn(move || {
                         let mut worker = Worker::new(&shared);
-                        for &pid in &chunk {
+                        while let Some(task) = queue.pop() {
                             if global_stop.load(Ordering::Relaxed) {
+                                queue.finish_task();
                                 break;
                             }
-                            let piece = shared.placements[pid as usize].piece as usize;
-                            worker.occupied.or_assign(&shared.placements[pid as usize].mask);
-                            worker.counts[piece] -= 1;
-                            worker.remaining_cells -= shared.areas[piece];
-                            worker.stack.push(pid);
-                            worker.search(&shared, started, &global_stop);
-                            worker.stack.pop();
-                            worker.remaining_cells += shared.areas[piece];
-                            worker.counts[piece] += 1;
-                            worker.occupied.xor_assign(&shared.placements[pid as usize].mask);
+                            worker.apply_task(task);
+                            worker.search(&shared, started, &global_stop, 1, Some(&queue));
+                            queue.finish_task();
                             if worker.stop {
                                 global_stop.store(true, Ordering::Relaxed);
                                 break;
@@ -557,7 +673,6 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
                     total_nodes += worker.nodes;
                     total_raw += worker.raw_solutions;
                     truncated = truncated || worker.stop;
-                    // Merge solutions from this worker, re-deduping across threads.
                     for sol in worker.solutions {
                         if opts.dedupe {
                             let key = canonical_key(&shared, &sol);
