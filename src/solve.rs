@@ -1,23 +1,14 @@
 //! The search engine.
 //!
 //! The puzzle is an exact-cover problem: every playable board cell has to be
-//! covered by exactly one piece. Because the board is dense and pieces are
-//! small, the classic "always extend the smallest uncovered cell" rule
-//! (Algorithm X with the first uncovered column) beats a generic DLX
-//! implementation: it needs no column headers, no dancing links and no row
-//! bookkeeping.
-//!
-//! Concretely:
-//!
-//! * each board cell is a bit in a `BitSet`;
-//! * each `(piece, orientation, position)` becomes one pre-computed mask;
-//! * placements are bucketed by their lowest cell, since a placement that
-//!   covers the first empty cell can never touch an earlier (already filled)
-//!   cell, so its lowest cell must be exactly that cell;
-//! * the search fills the first empty cell and only tries placements from that
-//!   bucket, pruning with a cell-count invariant and a region-size check.
+//! covered by exactly one piece. The search uses the minimum-remaining-values
+//! heuristic: at every node it picks the empty cell with the fewest feasible
+//! placements. The root-level branches are split across worker threads.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::bitset::BitSet;
@@ -26,7 +17,7 @@ use crate::model::Puzzle;
 
 #[derive(Clone, Debug)]
 pub struct PlacementInfo {
-    /// Index into `Puzzle::pieces`.
+    /// Index into the shared placements table.
     pub piece: usize,
     /// Board cell indices, ascending.
     pub cells: Vec<u32>,
@@ -36,7 +27,7 @@ pub struct PlacementInfo {
 
 #[derive(Clone, Debug)]
 pub struct Solution {
-    /// Indices into `SolveResult::placements`.
+    /// Indices into the placements table.
     pub placements: Vec<usize>,
     /// How many raw layouts collapse into this one under board symmetries.
     pub multiplicity: u64,
@@ -84,6 +75,282 @@ struct Placement {
     mirrored: bool,
 }
 
+/// Read-only data shared across worker threads.
+struct Shared {
+    n: usize,
+    board: BitSet,
+    placements: Vec<Placement>,
+    covering: Vec<Vec<u32>>,
+    counts_init: Vec<u16>,
+    areas: Vec<u32>,
+    class_of: Vec<u16>,
+    remaining_cells_init: u32,
+    all_use: bool,
+    syms: Vec<Vec<u32>>,
+    opts: SolveOptions,
+}
+
+/// Per-thread mutable search state.
+struct Worker {
+    occupied: BitSet,
+    counts: Vec<u16>,
+    remaining_cells: u32,
+    stack: Vec<u32>,
+    labels: Vec<u16>,
+    classes: HashMap<Vec<u16>, usize>,
+    solutions: Vec<Solution>,
+    raw_solutions: u64,
+    nodes: u64,
+    stop: bool,
+    dp: Vec<u64>,
+}
+
+impl Worker {
+    fn new(shared: &Shared) -> Self {
+        Self {
+            occupied: BitSet::new(shared.n),
+            counts: shared.counts_init.clone(),
+            remaining_cells: shared.remaining_cells_init,
+            stack: Vec::with_capacity(shared.areas.len() * 2),
+            labels: vec![0; shared.n],
+            classes: HashMap::new(),
+            solutions: Vec::new(),
+            raw_solutions: 0,
+            nodes: 0,
+            stop: false,
+            dp: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn is_stopped(&mut self, shared: &Shared, started: Instant, global_stop: &AtomicBool) -> bool {
+        if self.stop || global_stop.load(Ordering::Relaxed) {
+            return true;
+        }
+        if let Some(limit) = shared.opts.node_limit {
+            if self.nodes >= limit {
+                self.stop = true;
+                return true;
+            }
+        }
+        if self.nodes % 4096 == 0 {
+            if let Some(limit) = shared.opts.time_limit {
+                if started.elapsed() >= limit {
+                    self.stop = true;
+                    global_stop.store(true, Ordering::Relaxed);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn search(&mut self, shared: &Shared, started: Instant, global_stop: &AtomicBool) {
+        self.nodes += 1;
+        if self.is_stopped(shared, started, global_stop) {
+            return;
+        }
+
+        let empty = self.empty_count(shared);
+        if empty == 0 {
+            self.record(shared);
+            return;
+        }
+        if self.remaining_cells < empty {
+            return;
+        }
+        if shared.all_use && self.remaining_cells != empty {
+            return;
+        }
+        if !shared.all_use && !self.fillable_sum(shared, empty) {
+            return;
+        }
+
+        let chosen = self.choose_cell(shared);
+        let Some(anchor) = chosen else {
+            return;
+        };
+
+        let mut candidates: Vec<u32> = Vec::new();
+        for &pid in &shared.covering[anchor] {
+            let piece = shared.placements[pid as usize].piece as usize;
+            if self.counts[piece] == 0 {
+                continue;
+            }
+            if self.occupied.intersects(&shared.placements[pid as usize].mask) {
+                continue;
+            }
+            candidates.push(pid);
+        }
+        candidates.sort_by(|&a, &b| {
+            let pa = &shared.placements[a as usize];
+            let pb = &shared.placements[b as usize];
+            shared.areas[pb.piece as usize]
+                .cmp(&shared.areas[pa.piece as usize])
+                .then(pa.piece.cmp(&pb.piece))
+                .then(pa.mask.words().cmp(pb.mask.words()))
+        });
+
+        for &pid in &candidates {
+            if self.is_stopped(shared, started, global_stop) {
+                return;
+            }
+            let piece = shared.placements[pid as usize].piece as usize;
+            if self.counts[piece] == 0 {
+                continue;
+            }
+            if self.occupied.intersects(&shared.placements[pid as usize].mask) {
+                continue;
+            }
+
+            self.occupied.or_assign(&shared.placements[pid as usize].mask);
+            self.counts[piece] -= 1;
+            self.remaining_cells -= shared.areas[piece];
+            self.stack.push(pid);
+
+            self.search(shared, started, global_stop);
+
+            self.stack.pop();
+            self.remaining_cells += shared.areas[piece];
+            self.counts[piece] += 1;
+            self.occupied.xor_assign(&shared.placements[pid as usize].mask);
+        }
+    }
+
+    fn choose_cell(&self, shared: &Shared) -> Option<usize> {
+        let mut best_cell: Option<usize> = None;
+        let mut best_count = usize::MAX;
+
+        for (wi, (bw, ow)) in shared
+            .board
+            .words()
+            .iter()
+            .zip(self.occupied.words().iter())
+            .enumerate()
+        {
+            let mut empty_bits = bw & !ow;
+            while empty_bits != 0 {
+                let bit = empty_bits.trailing_zeros() as usize;
+                empty_bits &= empty_bits - 1;
+                let cell = wi * 64 + bit;
+
+                let mut count = 0usize;
+                for &pid in &shared.covering[cell] {
+                    let piece = shared.placements[pid as usize].piece as usize;
+                    if self.counts[piece] == 0 {
+                        continue;
+                    }
+                    if self.occupied.intersects(&shared.placements[pid as usize].mask) {
+                        continue;
+                    }
+                    count += 1;
+                    if count >= best_count {
+                        break;
+                    }
+                }
+                if count == 0 {
+                    return None;
+                }
+                if count < best_count {
+                    best_count = count;
+                    best_cell = Some(cell);
+                }
+            }
+        }
+        best_cell
+    }
+
+    #[inline]
+    fn empty_count(&self, shared: &Shared) -> u32 {
+        let mut total = 0;
+        for (b, o) in shared.board.words().iter().zip(self.occupied.words().iter()) {
+            total += (b & !o).count_ones();
+        }
+        total
+    }
+
+    fn fillable_sum(&mut self, shared: &Shared, target: u32) -> bool {
+        let words = target as usize / 64 + 1;
+        if self.dp.len() < words {
+            self.dp.resize(words, 0);
+        }
+        for word in self.dp.iter_mut() {
+            *word = 0;
+        }
+        self.dp[0] = 1;
+
+        for (piece, &count) in self.counts.iter().enumerate() {
+            let area = shared.areas[piece] as usize;
+            if area == 0 {
+                continue;
+            }
+            for _ in 0..count {
+                shift_left_or(&mut self.dp, area);
+            }
+        }
+
+        let target = target as usize;
+        self.dp[target / 64] & (1u64 << (target % 64)) != 0
+    }
+
+    fn record(&mut self, shared: &Shared) {
+        self.raw_solutions += 1;
+
+        for label in self.labels.iter_mut() {
+            *label = 0;
+        }
+        for &pid in &self.stack {
+            let placement = &shared.placements[pid as usize];
+            let class = shared.class_of[placement.piece as usize];
+            for cell in placement.mask.indices() {
+                self.labels[cell as usize] = class + 1;
+            }
+        }
+
+        let key: Vec<u16> = if shared.syms.len() > 1 {
+            let mut best: Option<Vec<u16>> = None;
+            for perm in &shared.syms {
+                let mut candidate = vec![0u16; shared.n];
+                for (cell, &target) in perm.iter().enumerate() {
+                    candidate[target as usize] = self.labels[cell];
+                }
+                if best.as_ref().is_none_or(|b| *b > candidate) {
+                    best = Some(candidate);
+                }
+            }
+            best.unwrap()
+        } else {
+            self.labels.clone()
+        };
+
+        let placements: Vec<usize> = self.stack.iter().map(|&p| p as usize).collect();
+
+        if shared.opts.dedupe {
+            if let Some(&index) = self.classes.get(&key) {
+                self.solutions[index].multiplicity += 1;
+            } else {
+                let index = self.solutions.len();
+                self.classes.insert(key, index);
+                self.solutions.push(Solution {
+                    placements,
+                    multiplicity: 1,
+                });
+            }
+        } else {
+            self.solutions.push(Solution {
+                placements,
+                multiplicity: 1,
+            });
+        }
+
+        if let Some(limit) = shared.opts.max_solutions {
+            if self.solutions.len() >= limit {
+                self.stop = true;
+            }
+        }
+    }
+}
+
 pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
     let started = Instant::now();
     let width = puzzle.board.width;
@@ -124,8 +391,6 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
                     if !fits {
                         continue;
                     }
-                    // Different orientations can describe the same placement;
-                    // keep only the first representative.
                     if !seen_masks.insert(mask.words().to_vec()) {
                         continue;
                     }
@@ -147,8 +412,6 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
 
     let areas: Vec<u32> = puzzle.pieces.iter().map(|p| p.area() as u32).collect();
 
-    // Pieces with the same shape are physically interchangeable, so solutions
-    // are compared on shape classes rather than on the user's piece ids.
     let mut shape_classes: HashMap<Vec<(u16, u16)>, u16> = HashMap::new();
     let mut class_of: Vec<u16> = Vec::with_capacity(puzzle.pieces.len());
     for piece in &puzzle.pieces {
@@ -157,50 +420,163 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
         class_of.push(class);
     }
 
-    let counts: Vec<u16> = puzzle.pieces.iter().map(|p| p.count).collect();
-    let remaining_cells: u32 = counts
+    let counts_init: Vec<u16> = puzzle.pieces.iter().map(|p| p.count).collect();
+    let remaining_cells_init: u32 = counts_init
         .iter()
         .zip(areas.iter())
         .map(|(&c, &a)| c as u32 * a)
         .sum();
     let symmetries = geom::board_symmetries(&puzzle.board);
 
-    let mut search = Search {
+    let shared = Shared {
         n,
         board,
-        occupied: BitSet::new(n),
         placements,
         covering,
-        counts,
+        counts_init,
         areas,
         class_of,
-        remaining_cells,
+        remaining_cells_init,
         all_use: puzzle.all_use,
         syms: symmetries,
-        stack: Vec::with_capacity(puzzle.pieces.len() * 2),
-        labels: vec![0; n],
-        classes: HashMap::new(),
-        solutions: Vec::new(),
-        raw_solutions: 0,
-        nodes: 0,
-        stop: false,
-        opts,
-        started,
-        dp: Vec::new(),
+        opts: opts.clone(),
     };
 
-    // If a playable cell is not covered by any placement at all, no solution
-    // can exist; failing here skips the search entirely.
+    // If a playable cell is not covered by any placement at all, no solution.
     let mut covered = BitSet::new(n);
-    for placement in &search.placements {
-        covered.or_assign(&placement.mask);
+    for p in &shared.placements {
+        covered.or_assign(&p.mask);
     }
-    let premature = (0..n).any(|cell| search.board.get(cell) && !covered.get(cell));
+    let premature = (0..n).any(|cell| shared.board.get(cell) && !covered.get(cell));
+
+    let mut all_solutions: Vec<Solution> = Vec::new();
+    let mut total_nodes = 0u64;
+    let mut total_raw = 0u64;
+    let mut truncated = false;
+
+    // Wrap shared data in Arc so worker threads can share it.
+    let shared = Arc::new(shared);
+    let symmetry_group = shared.syms.len();
+
     if !premature {
-        search.run();
+        // --- pick the root cell and enumerate root-level candidates --------
+        let root_worker = Worker::new(&shared);
+        let root_cell = root_worker.choose_cell(&shared);
+
+        if let Some(anchor) = root_cell {
+            let mut root_candidates: Vec<u32> = Vec::new();
+            for &pid in &shared.covering[anchor] {
+                let piece = shared.placements[pid as usize].piece as usize;
+                if root_worker.counts[piece] == 0 {
+                    continue;
+                }
+                if root_worker.occupied.intersects(&shared.placements[pid as usize].mask) {
+                    continue;
+                }
+                root_candidates.push(pid);
+            }
+            root_candidates.sort_by(|&a, &b| {
+                let pa = &shared.placements[a as usize];
+                let pb = &shared.placements[b as usize];
+                shared.areas[pb.piece as usize]
+                    .cmp(&shared.areas[pa.piece as usize])
+                    .then(pa.piece.cmp(&pb.piece))
+                    .then(pa.mask.words().cmp(pb.mask.words()))
+            });
+
+            // Decide thread count.
+            let num_threads = thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .min(root_candidates.len());
+
+            let global_stop = Arc::new(AtomicBool::new(false));
+
+            if num_threads <= 1 || root_candidates.len() <= 1 {
+                // Sequential path.
+                let mut worker = Worker::new(&shared);
+                for &pid in &root_candidates {
+                    let piece = shared.placements[pid as usize].piece as usize;
+                    worker.occupied.or_assign(&shared.placements[pid as usize].mask);
+                    worker.counts[piece] -= 1;
+                    worker.remaining_cells -= shared.areas[piece];
+                    worker.stack.push(pid);
+                    worker.search(&shared, started, &global_stop);
+                    worker.stack.pop();
+                    worker.remaining_cells += shared.areas[piece];
+                    worker.counts[piece] += 1;
+                    worker.occupied.xor_assign(&shared.placements[pid as usize].mask);
+                    if worker.stop {
+                        break;
+                    }
+                }
+                total_nodes = worker.nodes;
+                total_raw = worker.raw_solutions;
+                truncated = worker.stop;
+                all_solutions = worker.solutions;
+            } else {
+                // Parallel path: split root candidates across threads.
+                let chunk_size = root_candidates.len().div_ceil(num_threads);
+                let chunks: Vec<Vec<u32>> = root_candidates
+                    .chunks(chunk_size)
+                    .map(|c| c.to_vec())
+                    .collect();
+
+                let mut handles = Vec::new();
+                for chunk in chunks {
+                    let shared = shared.clone();
+                    let global_stop = global_stop.clone();
+                    handles.push(thread::spawn(move || {
+                        let mut worker = Worker::new(&shared);
+                        for &pid in &chunk {
+                            if global_stop.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let piece = shared.placements[pid as usize].piece as usize;
+                            worker.occupied.or_assign(&shared.placements[pid as usize].mask);
+                            worker.counts[piece] -= 1;
+                            worker.remaining_cells -= shared.areas[piece];
+                            worker.stack.push(pid);
+                            worker.search(&shared, started, &global_stop);
+                            worker.stack.pop();
+                            worker.remaining_cells += shared.areas[piece];
+                            worker.counts[piece] += 1;
+                            worker.occupied.xor_assign(&shared.placements[pid as usize].mask);
+                            if worker.stop {
+                                global_stop.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                        }
+                        worker
+                    }));
+                }
+
+                let mut merged_classes: HashMap<Vec<u16>, usize> = HashMap::new();
+                for handle in handles {
+                    let worker = handle.join().expect("worker thread panicked");
+                    total_nodes += worker.nodes;
+                    total_raw += worker.raw_solutions;
+                    truncated = truncated || worker.stop;
+                    // Merge solutions from this worker, re-deduping across threads.
+                    for sol in worker.solutions {
+                        if opts.dedupe {
+                            let key = canonical_key(&shared, &sol);
+                            if let Some(&idx) = merged_classes.get(&key) {
+                                all_solutions[idx].multiplicity += sol.multiplicity;
+                            } else {
+                                merged_classes.insert(key, all_solutions.len());
+                                all_solutions.push(sol);
+                            }
+                        } else {
+                            all_solutions.push(sol);
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    let placements_info: Vec<PlacementInfo> = search
+    let placements_info: Vec<PlacementInfo> = shared
         .placements
         .iter()
         .map(|p| PlacementInfo {
@@ -212,291 +588,45 @@ pub fn solve(puzzle: &Puzzle, opts: &SolveOptions) -> SolveResult {
         .collect();
 
     let stats = SolveStats {
-        nodes: search.nodes,
-        raw_solutions: search.raw_solutions,
+        nodes: total_nodes,
+        raw_solutions: total_raw,
         elapsed: started.elapsed(),
-        truncated: search.stop,
+        truncated,
     };
 
     SolveResult {
-        solutions: search.solutions,
+        solutions: all_solutions,
         placements: placements_info,
         stats,
-        symmetry_group: search.syms.len(),
+        symmetry_group,
     }
 }
 
-struct Search<'a> {
-    n: usize,
-    board: BitSet,
-    occupied: BitSet,
-    placements: Vec<Placement>,
-    /// cell -> every placement that covers that cell (for MRV selection)
-    covering: Vec<Vec<u32>>,
-    counts: Vec<u16>,
-    areas: Vec<u32>,
-    class_of: Vec<u16>,
-    remaining_cells: u32,
-    all_use: bool,
-    syms: Vec<Vec<u32>>,
-    stack: Vec<u32>,
-    labels: Vec<u16>,
-    classes: HashMap<Vec<u16>, usize>,
-    solutions: Vec<Solution>,
-    raw_solutions: u64,
-    nodes: u64,
-    stop: bool,
-    opts: &'a SolveOptions,
-    started: Instant,
-    dp: Vec<u64>,
-}
-
-impl<'a> Search<'a> {
-    fn run(&mut self) {
-        self.search();
-    }
-
-    #[inline]
-    fn is_stopped(&mut self) -> bool {
-        if self.stop {
-            return true;
-        }
-        if let Some(limit) = self.opts.node_limit {
-            if self.nodes >= limit {
-                self.stop = true;
-                return true;
-            }
-        }
-        if self.nodes % 4096 == 0 {
-            if let Some(limit) = self.opts.time_limit {
-                if self.started.elapsed() >= limit {
-                    self.stop = true;
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn search(&mut self) {
-        self.nodes += 1;
-        if self.is_stopped() {
-            return;
-        }
-
-        let empty = self.empty_count();
-        if empty == 0 {
-            self.record();
-            return;
-        }
-        if self.remaining_cells < empty {
-            return;
-        }
-        if self.all_use && self.remaining_cells != empty {
-            return;
-        }
-        if !self.all_use && !self.fillable_sum(empty) {
-            return;
-        }
-
-        // Choose the most constrained empty cell: the one with the fewest
-        // feasible placements covering it. This is the minimum-remaining-values
-        // heuristic and prunes the search tree dramatically.
-        let chosen = self.choose_cell();
-        let Some(anchor) = chosen else {
-            return;
-        };
-
-        // Collect the feasible placements covering the chosen cell. The list
-        // is small (at most a few dozen placements per cell), so a local Vec
-        // is cheaper than fighting the borrow checker across recursion.
-        let mut candidates: Vec<u32> = Vec::new();
-        for &pid in &self.covering[anchor] {
-            let piece = self.placements[pid as usize].piece as usize;
-            if self.counts[piece] == 0 {
-                continue;
-            }
-            if self.occupied.intersects(&self.placements[pid as usize].mask) {
-                continue;
-            }
-            candidates.push(pid);
-        }
-        // Bigger pieces first: they constrain the rest of the board the most.
-        candidates.sort_by(|&a, &b| {
-            let pa = &self.placements[a as usize];
-            let pb = &self.placements[b as usize];
-            self.areas[pb.piece as usize]
-                .cmp(&self.areas[pa.piece as usize])
-                .then(pa.piece.cmp(&pb.piece))
-                .then(pa.mask.words().cmp(pb.mask.words()))
-        });
-
-        for &pid in &candidates {
-            if self.is_stopped() {
-                return;
-            }
-            let piece = self.placements[pid as usize].piece as usize;
-            if self.counts[piece] == 0 {
-                continue;
-            }
-            if self.occupied.intersects(&self.placements[pid as usize].mask) {
-                continue;
-            }
-
-            self.occupied.or_assign(&self.placements[pid as usize].mask);
-            self.counts[piece] -= 1;
-            self.remaining_cells -= self.areas[piece];
-            self.stack.push(pid);
-
-            self.search();
-
-            self.stack.pop();
-            self.remaining_cells += self.areas[piece];
-            self.counts[piece] += 1;
-            self.occupied.xor_assign(&self.placements[pid as usize].mask);
+/// Recomputes the canonical label grid for a solution (used when merging
+/// solutions from multiple threads, since each thread has its own dedup map).
+fn canonical_key(shared: &Shared, sol: &Solution) -> Vec<u16> {
+    let mut labels = vec![0u16; shared.n];
+    for &pid in &sol.placements {
+        let placement = &shared.placements[pid];
+        let class = shared.class_of[placement.piece as usize];
+        for cell in placement.mask.indices() {
+            labels[cell as usize] = class + 1;
         }
     }
-
-    /// Picks the empty playable cell with the fewest feasible placements
-    /// covering it (MRV). Returns `None` when some empty cell has zero
-    /// candidates, in which case the branch is dead.
-    fn choose_cell(&self) -> Option<usize> {
-        let mut best_cell: Option<usize> = None;
-        let mut best_count = usize::MAX;
-
-        // Iterate only over empty playable cells using the bitboards.
-        for (wi, (bw, ow)) in self
-            .board
-            .words()
-            .iter()
-            .zip(self.occupied.words().iter())
-            .enumerate()
-        {
-            let mut empty_bits = bw & !ow;
-            while empty_bits != 0 {
-                let bit = empty_bits.trailing_zeros() as usize;
-                empty_bits &= empty_bits - 1;
-                let cell = wi * 64 + bit;
-
-                let mut count = 0usize;
-                for &pid in &self.covering[cell] {
-                    let piece = self.placements[pid as usize].piece as usize;
-                    if self.counts[piece] == 0 {
-                        continue;
-                    }
-                    if self.occupied.intersects(&self.placements[pid as usize].mask) {
-                        continue;
-                    }
-                    count += 1;
-                    if count >= best_count {
-                        break;
-                    }
-                }
-                if count == 0 {
-                    return None;
-                }
-                if count < best_count {
-                    best_count = count;
-                    best_cell = Some(cell);
-                }
+    if shared.syms.len() > 1 {
+        let mut best = labels.clone();
+        for perm in &shared.syms {
+            let mut candidate = vec![0u16; shared.n];
+            for (cell, &target) in perm.iter().enumerate() {
+                candidate[target as usize] = labels[cell];
+            }
+            if candidate < best {
+                best = candidate;
             }
         }
-        best_cell
-    }
-
-    /// Number of playable cells that are still empty.
-    #[inline]
-    fn empty_count(&self) -> u32 {
-        let mut total = 0;
-        for (b, o) in self.board.words().iter().zip(self.occupied.words().iter()) {
-            total += (b & !o).count_ones();
-        }
-        total
-    }
-
-    /// When unused pieces are allowed, the empty cell count has to be reachable
-    /// as a subset sum of the remaining pieces.
-    fn fillable_sum(&mut self, target: u32) -> bool {
-        let words = target as usize / 64 + 1;
-        if self.dp.len() < words {
-            self.dp.resize(words, 0);
-        }
-        for word in self.dp.iter_mut() {
-            *word = 0;
-        }
-        self.dp[0] = 1;
-
-        for (piece, &count) in self.counts.iter().enumerate() {
-            let area = self.areas[piece] as usize;
-            if area == 0 {
-                continue;
-            }
-            for _ in 0..count {
-                shift_left_or(&mut self.dp, area);
-            }
-        }
-
-        let target = target as usize;
-        self.dp[target / 64] & (1u64 << (target % 64)) != 0
-    }
-
-    fn record(&mut self) {
-        self.raw_solutions += 1;
-
-        for label in self.labels.iter_mut() {
-            *label = 0;
-        }
-        for &pid in &self.stack {
-            let placement = &self.placements[pid as usize];
-            let class = self.class_of[placement.piece as usize];
-            for cell in placement.mask.indices() {
-                self.labels[cell as usize] = class + 1;
-            }
-        }
-
-        // Canonical form: the lexicographically smallest label grid over all
-        // symmetries of the board.
-        let key: Vec<u16> = if self.syms.len() > 1 {
-            let mut best: Option<Vec<u16>> = None;
-            for perm in &self.syms {
-                let mut candidate = vec![0u16; self.n];
-                for (cell, &target) in perm.iter().enumerate() {
-                    candidate[target as usize] = self.labels[cell];
-                }
-                if best.as_ref().is_none_or(|b| *b > candidate) {
-                    best = Some(candidate);
-                }
-            }
-            best.unwrap()
-        } else {
-            self.labels.clone()
-        };
-
-        let placements: Vec<usize> = self.stack.iter().map(|&p| p as usize).collect();
-
-        if self.opts.dedupe {
-            if let Some(&index) = self.classes.get(&key) {
-                self.solutions[index].multiplicity += 1;
-            } else {
-                let index = self.solutions.len();
-                self.classes.insert(key, index);
-                self.solutions.push(Solution {
-                    placements,
-                    multiplicity: 1,
-                });
-            }
-        } else {
-            self.solutions.push(Solution {
-                placements,
-                multiplicity: 1,
-            });
-        }
-
-        if let Some(limit) = self.opts.max_solutions {
-            if self.solutions.len() >= limit {
-                self.stop = true;
-            }
-        }
+        best
+    } else {
+        labels
     }
 }
 
@@ -604,7 +734,6 @@ puzzle:
 
     #[test]
     fn rotation_flag_is_respected() {
-        // A vertical domino cannot fill a 2x1 board unless rotation is allowed.
         let text = r###"
 puzzle:
   board_shape: "rectangle{2,1}"
@@ -634,7 +763,6 @@ puzzle:
 
     #[test]
     fn piece_option_overrides_puzzle_default() {
-        // The puzzle allows rotation, but the piece itself does not.
         let text = r###"
 puzzle:
   board_shape: "rectangle{1,2}"
