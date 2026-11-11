@@ -111,16 +111,16 @@ pub fn render_solution<W: Write>(
         for c in 0..width {
             let idx = r * width + c;
             if !puzzle.board.cells[idx] {
-                write!(out, "  ")?;
+                write!(out, " ")?;
                 continue;
             }
             let label = labels[idx];
             if label == 0 {
                 // A board cell no piece covers (only possible in reports).
                 if theme.color {
-                    write!(out, "\x1b[38;5;{}m##\x1b[0m", theme.board_color)?;
+                    write!(out, "\x1b[38;5;{}m#\x1b[0m", theme.board_color)?;
                 } else {
-                    write!(out, "##")?;
+                    write!(out, "#")?;
                 }
                 continue;
             }
@@ -131,15 +131,15 @@ pub fn render_solution<W: Write>(
                 if labels_mode {
                     write!(
                         out,
-                        "\x1b[48;5;{bg}m\x1b[38;5;{fg}m{} \x1b[0m",
+                        "\x1b[48;5;{bg}m\x1b[38;5;{fg}m{}\x1b[0m",
                         (piece + 1) % 10
                     )?;
                 } else {
-                    write!(out, "\x1b[48;5;{bg}m\x1b[38;5;{fg}m##\x1b[0m")?;
+                    write!(out, "\x1b[48;5;{bg}m\x1b[38;5;{fg}m#\x1b[0m")?;
                 }
             } else {
                 let symbol = theme.symbol(piece);
-                write!(out, "{symbol}{symbol}")?;
+                write!(out, "{symbol}")?;
             }
         }
         writeln!(out)?;
