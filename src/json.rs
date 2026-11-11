@@ -161,11 +161,15 @@ pub fn build_report(puzzle: &Puzzle, result: &SolveResult) -> Report {
     }
 }
 
-pub fn write_to_file(path: &Path, puzzle: &Puzzle, result: &SolveResult) -> io::Result<()> {
+pub fn write_to_file(path: &Path, puzzle: &Puzzle, result: &SolveResult, compress: bool) -> io::Result<()> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
     let report = build_report(puzzle, result);
-    serde_json::to_writer_pretty(&mut writer, &report)?;
+    if compress {
+        serde_json::to_writer(&mut writer, &report)?;
+    } else {
+        serde_json::to_writer_pretty(&mut writer, &report)?;
+    }
     writer.write_all(b"\n")?;
     writer.flush()
 }

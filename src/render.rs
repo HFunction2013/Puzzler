@@ -45,19 +45,44 @@ impl Theme {
         let mut piece_colors = Vec::with_capacity(piece_types);
         let mut piece_foregrounds = Vec::with_capacity(piece_types);
         // Golden-angle hue stepping keeps neighbouring pieces far apart even
-        // when the piece count is large.
+        // when the piece count is large. We also reject colours that land too
+        // close to an already-chosen one (after xterm quantization).
         let offset = (splitmix64(seed) % 10_000) as f32 / 10_000.0;
+        let mut chosen_rgb: Vec<(u8, u8, u8)> = Vec::new();
+        const MIN_DIST_SQ: u32 = 3000; // ~55/255 per channel average
+
         for index in 0..piece_types {
-            let hue = (offset + index as f32 * 0.618_034) % 1.0;
-            let value = match background {
-                Background::Dark => 0.95,
-                Background::Light => 0.72,
-            };
-            let rgb = hsv_to_rgb(hue, 0.82, value);
-            let color = rgb_to_xterm(rgb);
-            let foreground = if luminance(rgb) > 140.0 { 0 } else { 15 };
-            piece_colors.push(color);
+            let mut best_color = 0u8;
+            let mut best_rgb = (0, 0, 0);
+            let mut best_score: u32 = 0;
+            // Try a few hue offsets and pick the one furthest from existing colors.
+            for attempt in 0..8 {
+                let hue = (offset + index as f32 * 0.618_034 + attempt as f32 * 0.07) % 1.0;
+                let value = match background {
+                    Background::Dark => 0.95,
+                    Background::Light => 0.72,
+                };
+                let rgb = hsv_to_rgb(hue, 0.82, value);
+                let color = rgb_to_xterm(rgb);
+                let actual_rgb = xterm_to_rgb(color);
+                let min_dist = chosen_rgb
+                    .iter()
+                    .map(|&c| color_distance(actual_rgb, c))
+                    .min()
+                    .unwrap_or(u32::MAX);
+                if min_dist > best_score {
+                    best_score = min_dist;
+                    best_color = color;
+                    best_rgb = actual_rgb;
+                }
+                if min_dist >= MIN_DIST_SQ {
+                    break;
+                }
+            }
+            let foreground = if luminance(best_rgb) > 140.0 { 0 } else { 15 };
+            piece_colors.push(best_color);
             piece_foregrounds.push(foreground);
+            chosen_rgb.push(best_rgb);
         }
         let board_color = match background {
             Background::Dark => 244,
@@ -153,10 +178,10 @@ pub fn render_legend<W: Write>(out: &mut W, puzzle: &Puzzle, theme: &Theme) -> i
         write!(out, "    ")?;
         if theme.color {
             let bg = theme.piece_colors[index];
-            write!(out, "\x1b[48;5;{bg}m  \x1b[0m ")?;
+            write!(out, "\x1b[48;5;{bg}m \x1b[0m ")?;
         } else {
             let symbol = theme.symbol(index);
-            write!(out, "{symbol}{symbol} ")?;
+            write!(out, "{symbol} ")?;
         }
         writeln!(
             out,
@@ -246,6 +271,22 @@ fn color_distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> u32 {
     let dg = a.1 as i32 - b.1 as i32;
     let db = a.2 as i32 - b.2 as i32;
     (dr * dr + dg * dg + db * db) as u32
+}
+
+/// Reverse of rgb_to_xterm: convert an xterm-256 index back to RGB.
+fn xterm_to_rgb(index: u8) -> (u8, u8, u8) {
+    if (16..=231).contains(&index) {
+        let i = index - 16;
+        let levels = [0, 95, 135, 175, 215, 255];
+        (
+            levels[(i / 36) as usize],
+            levels[((i % 36) / 6) as usize],
+            levels[(i % 6) as usize],
+        )
+    } else {
+        let v = 8 + 10 * (index - 232);
+        (v, v, v)
+    }
 }
 
 #[cfg(test)]

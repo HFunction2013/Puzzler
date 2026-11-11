@@ -62,6 +62,7 @@ struct Args {
     input: PathBuf,
     out: Option<PathBuf>,
     json: bool,
+    compress: bool,
     limit: Option<usize>,
     nodes: Option<u64>,
     time: Option<Duration>,
@@ -81,6 +82,7 @@ impl Args {
             input: PathBuf::new(),
             out: None,
             json: false,
+            compress: false,
             limit: None,
             nodes: None,
             time: None,
@@ -105,6 +107,7 @@ impl Args {
                     args.out = Some(PathBuf::from(value));
                 }
                 "--json" => args.json = true,
+                "--compress" => args.compress = true,
                 "--limit" => {
                     let value = iter.next().ok_or("`--limit` needs a number")?;
                     let parsed = value
@@ -251,7 +254,7 @@ fn execute(args: Args) -> i32 {
     let result = solve::solve(&puzzle, &opts);
 
     if let Some(path) = &args.out {
-        if let Err(error) = json::write_to_file(path, &puzzle, &result) {
+        if let Err(error) = json::write_to_file(path, &puzzle, &result, args.compress) {
             eprintln!("error: cannot write {}: {error}", path.display());
             return 1;
         }
@@ -265,7 +268,12 @@ fn execute(args: Args) -> i32 {
         let stdout = io::stdout();
         let mut out = stdout.lock();
         let report = json::build_report(&puzzle, &result);
-        if let Err(error) = serde_json::to_writer_pretty(&mut out, &report) {
+        let write_result = if args.compress {
+            serde_json::to_writer(&mut out, &report)
+        } else {
+            serde_json::to_writer_pretty(&mut out, &report)
+        };
+        if let Err(error) = write_result {
             eprintln!("error: cannot write JSON: {error}");
             return 1;
         }
